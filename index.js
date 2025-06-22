@@ -1,5 +1,3 @@
-// server.js
-
 const express = require('express');
 const multer = require('multer');
 const { google } = require('googleapis');
@@ -10,12 +8,13 @@ const path = require('path');
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
-// Path to your Google service account JSON key
-const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'service-account.json');
+// === Step 1: Write env variable to a temporary file ===
+const tempServiceAccountPath = '/tmp/service-account.json';
+fs.writeFileSync(tempServiceAccountPath, process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 
-// Initialize Google Drive API client
+// === Step 2: Initialize Google Drive API client ===
 const auth = new google.auth.GoogleAuth({
-  keyFile: SERVICE_ACCOUNT_PATH,
+  keyFile: tempServiceAccountPath,
   scopes: ['https://www.googleapis.com/auth/drive.file'],
 });
 
@@ -24,7 +23,7 @@ const drive = google.drive({ version: 'v3', auth });
 app.use(cors());
 app.use(express.json());
 
-// Upload endpoint
+// === Upload Endpoint ===
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
@@ -33,8 +32,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     const fileMetadata = {
       name: fileName,
-      // Replace this with your actual Google Drive folder ID
-      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'],
+      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // Replace with your Drive folder ID
     };
 
     const media = {
@@ -48,14 +46,12 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       fields: 'id, name, webViewLink',
     });
 
-    // Delete the temporary uploaded file after upload
-    fs.unlinkSync(req.file.path);
+    fs.unlinkSync(req.file.path); // Delete temporary file
 
     res.json({
       id: response.data.id,
       name: response.data.name,
-      webViewLink:
-        response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`,
+      webViewLink: response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`,
     });
   } catch (error) {
     console.error('Upload error:', error);
@@ -72,7 +68,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Grant access endpoint
+// === Grant Access Endpoint ===
 app.post('/grant-access', async (req, res) => {
   try {
     const { fileId, email } = req.body;
@@ -100,6 +96,7 @@ app.post('/grant-access', async (req, res) => {
   }
 });
 
+// === Server Listen ===
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server started on port ${PORT}`);
