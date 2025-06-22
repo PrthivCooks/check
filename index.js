@@ -1,13 +1,16 @@
 const express = require('express');
 const multer = require('multer');
 const { google } = require('googleapis');
-const fs = require('fs');
 const cors = require('cors');
 const path = require('path');
+const stream = require('stream');
 const Razorpay = require('razorpay');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+
+// Use multer memory storage to keep uploaded files in memory (buffer)
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 // Load environment variables from .env file (if local)
 require('dotenv').config();
@@ -39,7 +42,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Google Drive Upload Endpoint
+// === Google Drive Upload Endpoint ===
 app.post('/upload', upload.single('file'), async (req, res) => {
   console.log('Received /upload request');
   try {
@@ -56,9 +59,13 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // your Google Drive folder ID
     };
 
+    // Create a readable stream from the buffer (in-memory file)
+    const bufferStream = new stream.PassThrough();
+    bufferStream.end(req.file.buffer);
+
     const media = {
       mimeType: req.file.mimetype,
-      body: fs.createReadStream(req.file.path),
+      body: bufferStream,
     };
 
     const response = await drive.files.create({
@@ -69,8 +76,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     console.log('File uploaded to Google Drive:', response.data);
 
-    fs.unlinkSync(req.file.path);
-    console.log('Temporary file deleted:', req.file.path);
+    // No need to delete file from disk because it was never written to disk
 
     res.json({
       id: response.data.id,
@@ -80,19 +86,11 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     });
   } catch (error) {
     console.error('Upload error:', error);
-    if (req.file && req.file.path) {
-      try {
-        fs.unlinkSync(req.file.path);
-        console.log('Temporary file deleted after error:', req.file.path);
-      } catch (err) {
-        console.error('Error deleting temp file:', err);
-      }
-    }
     res.status(500).json({ error: error.message });
   }
 });
 
-// Google Drive Grant Access Endpoint
+// === Google Drive Grant Access Endpoint ===
 app.post('/grant-access', async (req, res) => {
   console.log('Received /grant-access request with body:', req.body);
   try {
@@ -124,7 +122,7 @@ app.post('/grant-access', async (req, res) => {
   }
 });
 
-// Razorpay Create Order Endpoint
+// === Razorpay Create Order Endpoint ===
 app.post('/create-razorpay-order', async (req, res) => {
   console.log('Received /create-razorpay-order request:', req.body);
   try {
