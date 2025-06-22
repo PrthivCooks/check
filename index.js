@@ -50,7 +50,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     const fileMetadata = {
       name: fileName,
-      parents: ['YOUR_GOOGLE_DRIVE_FOLDER_ID'], // Replace with your folder ID
+      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // Replace with your folder ID
     };
 
     // Convert buffer to stream for google drive API
