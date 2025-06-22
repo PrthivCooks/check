@@ -3,21 +3,27 @@ const multer = require('multer');
 const { google } = require('googleapis');
 const fs = require('fs');
 const cors = require('cors');
-const path = require('path');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: '/tmp/' }); // ✅ Only /tmp is writable in Vercel
 
-// === Step 1: Write env variable to a temporary file ===
-const tempServiceAccountPath = '/tmp/service-account.json';
-fs.writeFileSync(tempServiceAccountPath, process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+// === Use credentials from environment variable ===
+let credentials;
+try {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable.");
+  }
+  credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+} catch (err) {
+  console.error("Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:", err);
+  throw err;
+}
 
-// === Step 2: Initialize Google Drive API client ===
+// === Initialize Google Drive client ===
 const auth = new google.auth.GoogleAuth({
-  keyFile: tempServiceAccountPath,
+  credentials,
   scopes: ['https://www.googleapis.com/auth/drive.file'],
 });
-
 const drive = google.drive({ version: 'v3', auth });
 
 app.use(cors());
@@ -32,7 +38,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     const fileMetadata = {
       name: fileName,
-      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // Replace with your Drive folder ID
+      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // 🔁 Your Drive folder ID
     };
 
     const media = {
@@ -46,12 +52,15 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       fields: 'id, name, webViewLink',
     });
 
-    fs.unlinkSync(req.file.path); // Delete temporary file
+    // ✅ Clean up temp file
+    fs.unlinkSync(req.file.path);
 
     res.json({
       id: response.data.id,
       name: response.data.name,
-      webViewLink: response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`,
+      webViewLink:
+        response.data.webViewLink ||
+        `https://drive.google.com/file/d/${response.data.id}/view`,
     });
   } catch (error) {
     console.error('Upload error:', error);
@@ -96,8 +105,5 @@ app.post('/grant-access', async (req, res) => {
   }
 });
 
-// === Server Listen ===
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
-});
+// === Export as Vercel Serverless Function ===
+module.exports = app;
