@@ -1,23 +1,21 @@
 const express = require('express');
 const multer = require('multer');
 const { google } = require('googleapis');
+const stream = require('stream');
 const cors = require('cors');
 const path = require('path');
-const stream = require('stream');
 const Razorpay = require('razorpay');
+
+// Load environment variables from .env file if running locally
+require('dotenv').config();
 
 const app = express();
 
-// Use multer memory storage to keep uploaded files in memory (buffer)
+// Use multer memory storage (no disk writes)
 const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
+const upload = multer({ storage });
 
-// Load environment variables from .env file (if local)
-require('dotenv').config();
-
-// Google Drive service account JSON
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'service-account.json');
-
 console.log('Starting server with service account:', SERVICE_ACCOUNT_PATH);
 
 // Initialize Google Drive API client
@@ -25,10 +23,9 @@ const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_PATH,
   scopes: ['https://www.googleapis.com/auth/drive.file'],
 });
-
 const drive = google.drive({ version: 'v3', auth });
 
-// Initialize Razorpay client with keys from environment variables
+// Initialize Razorpay client with keys from environment variables (fallback keys)
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID || 'your_fallback_key_id',
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'your_fallback_key_secret',
@@ -44,22 +41,19 @@ app.use((req, res, next) => {
 
 // === Google Drive Upload Endpoint ===
 app.post('/upload', upload.single('file'), async (req, res) => {
-  console.log('Received /upload request');
   try {
     if (!req.file) {
-      console.warn('No file uploaded in /upload');
       return res.status(400).json({ error: 'No file uploaded.' });
     }
 
     const fileName = req.body.desiredFileName || req.file.originalname;
-    console.log('Uploading file:', fileName);
 
     const fileMetadata = {
       name: fileName,
-      parents: ['1dvJc1L-3_Ws74EISHdpUnfk0gBJqSCgv'], // your Google Drive folder ID
+      parents: ['YOUR_GOOGLE_DRIVE_FOLDER_ID'], // Replace with your folder ID
     };
 
-    // Create a readable stream from the buffer (in-memory file)
+    // Convert buffer to stream for google drive API
     const bufferStream = new stream.PassThrough();
     bufferStream.end(req.file.buffer);
 
@@ -76,8 +70,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     console.log('File uploaded to Google Drive:', response.data);
 
-    // No need to delete file from disk because it was never written to disk
-
     res.json({
       id: response.data.id,
       name: response.data.name,
@@ -92,12 +84,10 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
 // === Google Drive Grant Access Endpoint ===
 app.post('/grant-access', async (req, res) => {
-  console.log('Received /grant-access request with body:', req.body);
   try {
     const { fileId, email } = req.body;
 
     if (!fileId || !email) {
-      console.warn('Missing fileId or email in /grant-access');
       return res.status(400).json({ error: 'fileId and email are required' });
     }
 
@@ -124,12 +114,10 @@ app.post('/grant-access', async (req, res) => {
 
 // === Razorpay Create Order Endpoint ===
 app.post('/create-razorpay-order', async (req, res) => {
-  console.log('Received /create-razorpay-order request:', req.body);
   try {
     const { orderId, amount } = req.body;
 
     if (!orderId || !amount) {
-      console.warn('Missing orderId or amount in /create-razorpay-order');
       return res.status(400).json({ error: 'orderId and amount are required' });
     }
 
