@@ -1,15 +1,17 @@
 {
-  "name": "vwrite-backend",
+  "name": "vercel-serverless-google-razorpay",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "multer": "^2.0.1",
-    "googleapis": "^150.0.1",
     "cors": "^2.8.5",
-    "razorpay": "^2.9.6"
+    "express": "^4.18.2",
+    "fs": "0.0.1-security",
+    "googleapis": "^134.0.0",
+    "multer": "^1.4.5-lts.1",
+    "razorpay": "^2.9.0",
+    "dotenv": "^16.3.1"
   }
 }
