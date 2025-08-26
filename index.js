@@ -56,49 +56,36 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     }
 
     const fileName = req.body.desiredFileName || req.file.originalname;
-    const fileMetadata = {
-      name: fileName,
-      parents: [process.env.GOOGLE_DRIVE_FOLDER_ID], // Set this in ENV
-    };
 
+    // Step 1: Upload file to service account's temp space
     const bufferStream = new stream.PassThrough();
     bufferStream.end(req.file.buffer);
 
-    const media = {
-      mimeType: req.file.mimetype,
-      body: bufferStream,
-    };
+    const tempFile = await drive.files.create({
+      requestBody: { name: fileName },
+      media: { mimeType: req.file.mimetype, body: bufferStream },
+      fields: 'id',
+    });
 
-    const response = await drive.files.create({
-      requestBody: fileMetadata,
-      media,
+    // Step 2: Copy file into your Gmail-owned folder
+    const copy = await drive.files.copy({
+      fileId: tempFile.data.id,
+      requestBody: {
+        name: fileName,
+        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
+      },
       fields: 'id, name, webViewLink',
     });
 
-    console.log('File uploaded:', response.data);
+    // Step 3: Delete temp file (service account-owned, 0 quota)
+    await drive.files.delete({ fileId: tempFile.data.id });
 
-    // === Transfer ownership to your Gmail ===
-    if (process.env.MY_GMAIL) {
-      try {
-        await drive.permissions.create({
-          fileId: response.data.id,
-          requestBody: {
-            type: 'user',
-            role: 'owner',
-            emailAddress: process.env.MY_GMAIL,
-          },
-          transferOwnership: true,
-        });
-        console.log(`Ownership transferred to ${process.env.MY_GMAIL}`);
-      } catch (permErr) {
-        console.error('Failed to transfer ownership:', permErr.message);
-      }
-    }
+    console.log('File uploaded and copied to your folder:', copy.data);
 
     res.json({
-      id: response.data.id,
-      name: response.data.name,
-      webViewLink: response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`,
+      id: copy.data.id,
+      name: copy.data.name,
+      webViewLink: copy.data.webViewLink || `https://drive.google.com/file/d/${copy.data.id}/view`,
     });
   } catch (error) {
     console.error('Upload error:', error);
