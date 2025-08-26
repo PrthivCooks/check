@@ -32,7 +32,7 @@ try {
 // === Initialize Google Drive client ===
 const auth = new google.auth.GoogleAuth({
   credentials,
-  scopes: ['https://www.googleapis.com/auth/drive.file'],
+  scopes: ['https://www.googleapis.com/auth/drive'],
 });
 const drive = google.drive({ version: 'v3', auth });
 
@@ -76,6 +76,24 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     });
 
     console.log('File uploaded:', response.data);
+
+    // === Transfer ownership to your Gmail ===
+    if (process.env.MY_GMAIL) {
+      try {
+        await drive.permissions.create({
+          fileId: response.data.id,
+          requestBody: {
+            type: 'user',
+            role: 'owner',
+            emailAddress: process.env.MY_GMAIL,
+          },
+          transferOwnership: true,
+        });
+        console.log(`Ownership transferred to ${process.env.MY_GMAIL}`);
+      } catch (permErr) {
+        console.error('Failed to transfer ownership:', permErr.message);
+      }
+    }
 
     res.json({
       id: response.data.id,
