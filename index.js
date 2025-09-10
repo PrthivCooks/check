@@ -1,243 +1,235 @@
-// server.js — Works with My Drive folder (no Shared Drive required)
-
+// server.js – OAuth Drive upload + grant-access + Razorpay (optional)
 const express = require('express');
 const multer = require('multer');
 const { google } = require('googleapis');
 const cors = require('cors');
 const Razorpay = require('razorpay');
-const path = require('path');
 const { Readable } = require('stream');
 
-// ───────────────────────────────────────────────────────────────────────────────
-// ⇩⇩ FILL THESE ⇩⇩
-const DRIVE_FOLDER_ID = 'YOUR_MYDRIVE_FOLDER_ID_HERE'; // <— put your real folder id
-const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'service-account.json'); // or an absolute path
-// ⇧⇧ FILL THESE ⇧⇧
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------- ENV ----------
+const {
+  OAUTH_CLIENT_ID,
+  OAUTH_CLIENT_SECRET,
+  OAUTH_REDIRECT_URI,     // e.g. https://<your-vercel-app>.vercel.app/oauth2callback
+  DRIVE_FOLDER_ID,        // The FOLDER ID you want to upload into
+  TOKENS_B64,             // base64 of tokens.json (recommended)  OR
+  TOKENS_JSON,            // raw JSON (multiline) – only if Vercel accepts it
+  RAZORPAY_KEY_ID,
+  RAZORPAY_KEY_SECRET,
+  CORS_ORIGIN             // optional: e.g. https://your-frontend-domain.com
+} = process.env;
 
+// ---------- APP ----------
 const app = express();
+app.use(cors(CORS_ORIGIN ? { origin: CORS_ORIGIN } : undefined));
+app.use(express.json());
 
-// In-memory upload (works on Vercel/Netlify; no disk writes)
+app.get('/', (_req, res) => res.json({ ok: true, message: 'API up' }));
+
+// ---------- Multer (in-memory) ----------
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB cap
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
 
-// Basic middleware
-app.use(cors());
-app.use(express.json());
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  next();
-});
-
-// Health check
-app.get('/', (_req, res) => {
-  res.json({ ok: true, message: 'API up' });
-});
-
-// ───────────────────────────────────────────────────────────────────────────────
-// Google Drive auth (FULL scope so SA can read shared My Drive folders)
-console.log('Using service account key file:', SERVICE_ACCOUNT_PATH);
-
-const auth = new google.auth.GoogleAuth({
-  keyFile: SERVICE_ACCOUNT_PATH,
-  scopes: ['https://www.googleapis.com/auth/drive'], // full scope (not drive.file)
-});
-
-const drive = google.drive({ version: 'v3', auth });
-
-// Helper: resolve a parent folder ID (works for My Drive and Shared Drive)
-async function resolveParentFolder(folderIdInput) {
-  let meta;
+// ---------- Razorpay (optional) ----------
+let razorpay = null;
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET) {
+  razorpay = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
+}
+app.post('/create-razorpay-order', async (req, res) => {
   try {
-    meta = await drive.files.get({
-      fileId: folderIdInput,
-      fields: 'id,name,mimeType,shortcutDetails',
-      supportsAllDrives: true, // harmless for My Drive
-    });
-  } catch (e) {
-    console.error('Drive get (parent folder) failed:', e?.response?.data || e?.message || e);
-    throw new Error(`File not found or no permission for folder ID: ${folderIdInput}`);
-  }
+    if (!razorpay) {
+      return res.status(400).json({ error: 'Razorpay not configured. Set RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET.' });
+    }
+    const { orderId, amount } = req.body;
+    if (!orderId || !amount) return res.status(400).json({ error: 'orderId and amount are required' });
 
-  // Follow shortcut if needed
+    const order = await razorpay.orders.create({
+      amount,
+      currency: 'INR',
+      receipt: orderId,
+      payment_capture: 1,
+    });
+    res.json(order);
+  } catch (err) {
+    console.error('Razorpay error:', err?.message || err);
+    res.status(500).json({ error: err?.message || 'Failed to create Razorpay order' });
+  }
+});
+
+// ---------- OAuth2 client ----------
+function requireOAuthEnv() {
+  const missing = [];
+  if (!OAUTH_CLIENT_ID) missing.push('OAUTH_CLIENT_ID');
+  if (!OAUTH_CLIENT_SECRET) missing.push('OAUTH_CLIENT_SECRET');
+  if (!OAUTH_REDIRECT_URI) missing.push('OAUTH_REDIRECT_URI');
+  if (missing.length) throw new Error(`Missing env: ${missing.join(', ')}`);
+}
+
+requireOAuthEnv();
+const oauth2Client = new google.auth.OAuth2(
+  OAUTH_CLIENT_ID,
+  OAUTH_CLIENT_SECRET,
+  OAUTH_REDIRECT_URI
+);
+
+// load tokens from env (prefer base64)
+(function loadTokens() {
+  try {
+    let json = null;
+    if (TOKENS_B64) {
+      const raw = Buffer.from(TOKENS_B64, 'base64').toString('utf8');
+      json = JSON.parse(raw);
+    } else if (TOKENS_JSON) {
+      json = JSON.parse(TOKENS_JSON);
+    }
+    if (json) oauth2Client.setCredentials(json);
+  } catch (e) {
+    console.warn('Could not parse tokens from env; /auth is required once.', e?.message || e);
+  }
+})();
+
+const getDrive = () => google.drive({ version: 'v3', auth: oauth2Client });
+const hasRefreshToken = () => !!(oauth2Client.credentials && oauth2Client.credentials.refresh_token);
+
+async function ensureAuthed(res) {
+  if (!hasRefreshToken()) {
+    res.status(401).json({ error: 'Not authorized. Visit /auth to grant access.' });
+    return false;
+  }
+  return true;
+}
+
+// ---------- Auth endpoints ----------
+app.get('/auth', (_req, res) => {
+  try {
+    const url = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: ['https://www.googleapis.com/auth/drive'],
+    });
+    res.redirect(url);
+  } catch (e) {
+    res.status(500).send(e?.message || 'Failed to init OAuth');
+  }
+});
+
+app.get('/oauth2callback', async (req, res) => {
+  try {
+    const { code } = req.query;
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    // IMPORTANT: In serverless we can’t write files. Copy this JSON from logs and
+    // store it in Vercel env (TOKENS_B64 or TOKENS_JSON).
+    console.log('=== COPY THIS TOKENS JSON INTO VERCEL ENV (TOKENS_JSON or TOKENS_B64) ===');
+    console.log(JSON.stringify(tokens, null, 2));
+
+    res.send('Authorization successful! Copy tokens from logs → add to Vercel env → redeploy.');
+  } catch (e) {
+    console.error('OAuth callback error:', e?.response?.data || e?.message || e);
+    res.status(500).send('OAuth error. Check logs.');
+  }
+});
+
+app.get('/auth/status', (_req, res) => {
+  res.json({ authorized: hasRefreshToken() });
+});
+
+// ---------- Resolve parent folder (follows shortcuts) ----------
+async function resolveParentFolder(folderIdInput) {
+  const drive = getDrive();
+  const meta = await drive.files.get({
+    fileId: folderIdInput,
+    fields: 'id,name,mimeType,shortcutDetails',
+    supportsAllDrives: true,
+  });
+
   if (meta.data.shortcutDetails?.targetId) {
     const targetId = meta.data.shortcutDetails.targetId;
-    try {
-      const target = await drive.files.get({
-        fileId: targetId,
-        fields: 'id,name,mimeType',
-        supportsAllDrives: true,
-      });
-      if (target.data.mimeType !== 'application/vnd.google-apps.folder') {
-        throw new Error('Shortcut target is not a folder');
-      }
-      return target.data.id;
-    } catch (e) {
-      console.error('Drive get (shortcut target) failed:', e?.response?.data || e?.message || e);
-      throw new Error(`Shortcut target not accessible for ID: ${targetId}`);
+    const target = await drive.files.get({
+      fileId: targetId,
+      fields: 'id,name,mimeType',
+      supportsAllDrives: true,
+    });
+    if (target.data.mimeType !== 'application/vnd.google-apps.folder') {
+      throw new Error('Shortcut target is not a folder');
     }
+    return target.data.id;
   }
-
   if (meta.data.mimeType !== 'application/vnd.google-apps.folder') {
     throw new Error('Provided ID is not a folder');
   }
-
   return meta.data.id;
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// === Upload to Google Drive (My Drive folder) ===
+// ---------- Upload ----------
 app.post('/upload', upload.single('file'), async (req, res) => {
-  console.log('Received /upload request');
-
   try {
-    if (!req.file) {
-      console.warn('No file uploaded in /upload');
-      return res.status(400).json({ error: 'No file uploaded.' });
-    }
+    if (!(await ensureAuthed(res))) return;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+    if (!DRIVE_FOLDER_ID) return res.status(500).json({ error: 'Missing DRIVE_FOLDER_ID' });
 
-    if (!DRIVE_FOLDER_ID) {
-      return res.status(500).json({ error: 'Missing DRIVE_FOLDER_ID in server.js' });
-    }
-
+    const drive = getDrive();
     const parentId = await resolveParentFolder(DRIVE_FOLDER_ID);
     const fileName = req.body.desiredFileName || req.file.originalname;
 
-    console.log('Uploading file:', fileName, 'to parent:', parentId);
-
-    const fileMetadata = {
-      name: fileName,
-      parents: [parentId],
-    };
-
-    const media = {
-      mimeType: req.file.mimetype,
-      body: Readable.from(req.file.buffer),
-    };
-
     const createResp = await drive.files.create({
-      requestBody: fileMetadata,
-      media,
+      requestBody: { name: fileName, parents: [parentId] },
+      media: { mimeType: req.file.mimetype, body: Readable.from(req.file.buffer) },
       fields: 'id,name,webViewLink',
       supportsAllDrives: true,
     });
 
-    // Sometimes webViewLink is only populated after a get
+    // Ensure webViewLink
     const meta = await drive.files.get({
       fileId: createResp.data.id,
       fields: 'id,name,webViewLink',
       supportsAllDrives: true,
     });
 
-    console.log('File uploaded:', meta.data);
-
-    return res.json({
+    res.json({
       id: meta.data.id,
       name: meta.data.name,
-      webViewLink:
-        meta.data.webViewLink ||
-        `https://drive.google.com/file/d/${meta.data.id}/view`,
+      webViewLink: meta.data.webViewLink || `https://drive.google.com/file/d/${meta.data.id}/view`,
     });
   } catch (error) {
     console.error('Upload error:', error?.response?.data || error?.errors || error?.message || error);
-    return res.status(500).json({
-      error:
-        (error?.response?.data?.error?.message) ||
-        error?.message ||
-        'Upload failed',
+    res.status(500).json({
+      error: (error?.response?.data?.error?.message) || error?.message || 'Upload failed',
     });
   }
 });
 
-// === Grant read access to a user (email) ===
+// ---------- Grant access ----------
 app.post('/grant-access', async (req, res) => {
-  console.log('Received /grant-access request with body:', req.body);
   try {
+    if (!(await ensureAuthed(res))) return;
     const { fileId, email } = req.body;
-    if (!fileId || !email) {
-      console.warn('Missing fileId or email in /grant-access');
-      return res.status(400).json({ error: 'fileId and email are required' });
-    }
+    if (!fileId || !email) return res.status(400).json({ error: 'fileId and email are required' });
 
-    const permission = {
-      type: 'user',
-      role: 'reader',
-      emailAddress: email,
-    };
-
-    const permissionResponse = await drive.permissions.create({
+    const drive = getDrive();
+    await drive.permissions.create({
       fileId,
-      requestBody: permission,
+      requestBody: { type: 'user', role: 'reader', emailAddress: email },
       fields: 'id',
       sendNotificationEmail: false,
       supportsAllDrives: true,
     });
-
-    console.log(`Granted access to ${email} on file ${fileId}`, permissionResponse.data);
-    return res.json({ success: true, message: `Access granted to ${email}` });
+    res.json({ success: true, message: `Access granted to ${email}` });
   } catch (error) {
     console.error('Grant access error:', error?.response?.data || error?.errors || error?.message || error);
-    return res.status(500).json({
-      error:
-        (error?.response?.data?.error?.message) ||
-        error?.message ||
-        'Grant access failed',
+    res.status(500).json({
+      error: (error?.response?.data?.error?.message) || error?.message || 'Grant access failed',
     });
   }
 });
 
-// === Debug: verify the server can see/resolve the folder ===
-app.get('/debug/parent/:id', async (req, res) => {
-  try {
-    const id = await resolveParentFolder(req.params.id);
-    res.json({ ok: true, resolvedId: id });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-// ───────────────────────────────────────────────────────────────────────────────
-// Razorpay (leave your own keys here or keep placeholders)
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'your_fallback_key_id', 
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'your_fallback_key_secret',
-});
-
-app.post('/create-razorpay-order', async (req, res) => {
-  console.log('Received /create-razorpay-order request:', req.body);
-  try {
-    const { orderId, amount } = req.body;
-    if (!orderId || !amount) {
-      console.warn('Missing orderId or amount in /create-razorpay-order');
-      return res.status(400).json({ error: 'orderId and amount are required' });
-    }
-
-    const options = {
-      amount, // in paise
-      currency: 'INR',
-      receipt: orderId,
-      payment_capture: 1,
-    };
-
-    const order = await razorpay.orders.create(options);
-    console.log('Razorpay order created:', order);
-    return res.json(order);
-  } catch (error) {
-    console.error('Razorpay order creation error:', error?.message || error);
-    return res.status(500).json({ error: error?.message || 'Failed to create Razorpay order' });
-  }
-});
-
-// ───────────────────────────────────────────────────────────────────────────────
-// Export for serverless or start locally
+// ---------- Export for Vercel / or start locally ----------
 if (process.env.VERCEL) {
   module.exports = app;
 } else {
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => {
-    console.log(`Server started on port ${PORT}`);
-    console.log(`Debug parent check: http://localhost:${PORT}/debug/parent/${DRIVE_FOLDER_ID}`);
-  });
+  app.listen(PORT, () => console.log(`API listening on http://localhost:${PORT}`));
 }
