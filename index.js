@@ -16,7 +16,12 @@ const {
   TOKENS_JSON,            // raw JSON (multiline) – only if Vercel accepts it
   RAZORPAY_KEY_ID,
   RAZORPAY_KEY_SECRET,
-  CORS_ORIGIN             // optional: e.g. https://your-frontend-domain.com
+  CORS_ORIGIN,             // optional: e.g. https://your-frontend-domain.com
+  BREVO_SMTP_HOST,
+  BREVO_SMTP_PORT,
+  BREVO_SMTP_USER,
+  BREVO_SMTP_KEY,
+  MAIL_FROM
 } = process.env;
 
 // ---------- APP ----------
@@ -223,6 +228,65 @@ app.post('/grant-access', async (req, res) => {
     res.status(500).json({
       error: (error?.response?.data?.error?.message) || error?.message || 'Grant access failed',
     });
+  }
+});
+const nodemailer = require('nodemailer');
+
+// Create a reusable SMTP transport (Brevo)
+const mailer = nodemailer.createTransport({
+  host: process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com',
+  port: Number(process.env.BREVO_SMTP_PORT || 587),
+  secure: false, // TLS is auto-started on 587
+  auth: {
+    user: process.env.BREVO_SMTP_USER, // usually your Brevo login/email
+    pass: process.env.BREVO_SMTP_KEY,  // the SMTP key from Brevo
+  },
+});
+
+// POST /send-email
+app.post('/send-email', async (req, res) => {
+  try {
+    const { to, template, vars } = req.body;
+    if (!to || !template) {
+      return res.status(400).json({ error: 'to and template are required' });
+    }
+
+    // Simple templates (mirror your WhatsApp ones)
+    const subjects = {
+      order_placed: 'Your order is placed',
+      order_accepted: 'Your order was accepted',
+      check_completion: 'Please confirm completion',
+      admin_posted: 'Order posted',
+    };
+
+    const bodies = {
+      order_placed: ({ name, orderId }) =>
+        `Dear ${name || 'customer'}, your order ${orderId} is placed. Please wait for a writer to accept.`,
+      order_accepted: ({ orderId, deadline }) =>
+        `Yay! Order ${orderId} accepted. Please make payment before ${deadline} to confirm. Writing starts after payment.`,
+      check_completion: ({ orderId, requestedAt }) =>
+        `Your writer requested completion confirmation for order ${orderId} at ${requestedAt}. Please check your dashboard.`,
+      admin_posted: ({ orderId, amount }) =>
+        `Order ${orderId} has been posted. Please check website for receipt/ID. Amount: ₹${amount}.`,
+    };
+
+    const subject = subjects[template] || 'VWRITE update';
+    const bodyMaker = bodies[template];
+    const text = bodyMaker ? bodyMaker(vars || {}) : 'Hello from VWRITE.';
+
+    const info = await mailer.sendMail({
+      from: process.env.MAIL_FROM || 'VWRITE <noreply@yourdomain.com>',
+      to,
+      subject,
+      text,
+      // (optional) nice HTML version:
+      html: `<p>${text.replace(/\n/g, '<br/>')}</p>`,
+    });
+
+    res.json({ ok: true, messageId: info.messageId });
+  } catch (e) {
+    console.error('send-email error:', e?.message || e);
+    res.status(500).json({ error: e?.message || 'send failed' });
   }
 });
 
